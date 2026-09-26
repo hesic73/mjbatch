@@ -256,9 +256,12 @@ inline void LogTrap(const mjLogMessage* msg) {
 }
 inline void InstallLogTrap() { prev_log_handler = mju_setLogHandler(LogTrap); }
 
+// A per-sim program for Batch::call: the sim's model and data on the worker that runs it.
+using CallFn = void (*)(mjModel* m, mjData* d, int sim, void* userdata);
+
 class Batch {
  public:
-  enum class Op { Step, Forward, Reset, SetConst };
+  enum class Op { Step, Forward, Reset, SetConst, Call };
   using Ids = nb::ndarray<nb::ndim<1>, nb::c_contig>;
 
   Batch(nb::object model, int num_sims, int num_threads, bool forward)
@@ -344,6 +347,21 @@ class Batch {
     Run(Op::Step, std::move(sel), nstep, hist);
   }
   void forward(std::optional<Ids> ids) { Run(Op::Forward, Parse(ids), 0); }
+
+  // fn(m, d, sim, userdata) per sim, on a worker, with the sim's state and pending writes
+  // loaded into d and d's state stored as the sim's after. fn may write m only in expanded
+  // fields, which are per worker and reapplied before every call; the rest of m is shared.
+  void call(uintptr_t fn, uintptr_t userdata, std::optional<Ids> ids) {
+    if (!fn) throw nb::value_error("fn must be a function address");
+    auto sel = Parse(ids);
+    nb::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(mu_);
+    call_fn_ = reinterpret_cast<CallFn>(fn);
+    call_userdata_ = reinterpret_cast<void*>(userdata);
+    error_.clear();
+    RunLocked(Op::Call, sel, 0);
+    if (!error_.empty()) throw std::runtime_error(error_);
+  }
 
   void reset(std::optional<Ids> ids, int keyframe) {
     if (keyframe < -1 || keyframe >= template_->nkey) {
@@ -526,6 +544,10 @@ class Batch {
       case Op::Reset:
         mj_forward(m, d);
         break;
+      case Op::Call:
+        call_fn_(m, d, i, call_userdata_);
+        if (forward_) mj_forward(m, d);
+        break;
       case Op::SetConst:
         break;
     }
@@ -634,4 +656,6 @@ class Batch {
   std::mutex mu_;          // serializes calls; held with the GIL released in Run
   std::mutex changed_mu_;  // changed_ and error_ from workers
   std::string error_;
+  CallFn call_fn_ = nullptr;  // the running call's program, under mu_
+  void* call_userdata_ = nullptr;
 };

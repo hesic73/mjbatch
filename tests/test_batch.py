@@ -633,3 +633,30 @@ def test_state_rows_copy_restore_and_compose(model):
   with pytest.raises(ValueError):
     batch.bind("state", np.float32)
   assert np.shares_memory(batch.bind("state"), state)
+
+
+def test_call_runs_a_c_program_per_sim(model):
+  import ctypes
+  import pathlib
+
+  lib = next(pathlib.Path(mujoco.__file__).parent.glob("libmujoco.so*"))
+  mj_step = ctypes.CDLL(str(lib)).mj_step
+  mj_step.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+  seen = np.zeros(4, dtype=np.int64)
+
+  @ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)
+  def program(m, d, sim, userdata):
+    ctypes.cast(userdata, ctypes.POINTER(ctypes.c_int64))[sim] += 1
+    for _ in range(3):
+      mj_step(m, d)
+
+  called, stepped = Batch(model, 4, num_threads=2), Batch(model, 4, num_threads=2)
+  for batch in (called, stepped):
+    batch.bind("qvel")[:] = np.linspace(-1, 1, 4)[:, None]
+  address = ctypes.cast(program, ctypes.c_void_p).value
+  called.call(address, seen.ctypes.data)
+  stepped.step(nstep=3)
+  np.testing.assert_array_equal(called.bind("state"), stepped.bind("state"))
+  np.testing.assert_array_equal(seen, 1)
+  called.call(address, seen.ctypes.data, ids=np.array([1, 3]))
+  np.testing.assert_array_equal(seen, [1, 2, 1, 2])

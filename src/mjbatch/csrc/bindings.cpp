@@ -78,6 +78,13 @@ handler installed at import; installing another handler later disables it.)")
            "filled with each selected simulation's state after every substep, in "
            "bind(\"state\") order; the rows of a simulation that raises are undefined.")
       .def("forward", &Batch::forward, "ids"_a.noconvert() = nb::none())
+      .def("call", &Batch::call, "fn"_a, "userdata"_a = 0, "ids"_a.noconvert() = nb::none(),
+           "fn(m, d, sim, userdata) for each selected simulation, on its worker: fn is the "
+           "address of a C function void(mjModel*, mjData*, int, void*), such as a ctypes "
+           "function pointer's, and userdata an address passed through. The simulation's "
+           "state and pending field writes are loaded into d first and d's state is its "
+           "state after; with forward=True, mj_forward runs after fn. fn may write m only "
+           "in expanded fields. A MuJoCo error inside fn raises as a step's does.")
       .def("reset", &Batch::reset, "ids"_a.noconvert() = nb::none(), "keyframe"_a = -1,
            "mj_resetData, or mj_resetDataKeyframe when keyframe >= 0, then mj_forward.")
       .def("set_const", &Batch::set_const, "ids"_a.noconvert() = nb::none());
